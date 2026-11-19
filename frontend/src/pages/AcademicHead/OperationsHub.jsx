@@ -674,7 +674,7 @@ const OperationsHub = ({ section }) => {
                     </button>
                   ) : (
                     item.completion_file && (
-                      <a href={`http://localhost:5000${item.completion_file}`} target="_blank" rel="noreferrer" className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-200 transition-colors">
+                      <a href={`http://localhost:4000${item.completion_file}`} target="_blank" rel="noreferrer" className="px-4 py-2 bg-slate-100 text-slate-600 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-slate-200 transition-colors">
                         View File
                       </a>
                     )
