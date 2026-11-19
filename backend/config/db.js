@@ -82,28 +82,117 @@ async function executeMongoQuery(sql, params = []) {
 
             let filter = {};
 
-            // Simple WHERE parsing (id = ?, email = ?, etc.)
+            // WHERE parsing with proper OR/AND support
             const whereMatch = cleanSql.match(/\bWHERE\s+(.*?)(\bORDER\b|\bGROUP\b|\bLIMIT\b|$)/i);
             if (whereMatch) {
-                const whereClause = whereMatch[1];
+                const whereClause = whereMatch[1].trim();
                 let pIndex = 0;
 
-                const conditions = whereClause.split(/\s+AND\s+|\s+OR\s+/i);
-                for (const cond of conditions) {
-                    const eqMatch = cond.match(/([a-zA-Z0-9_.]+)\s*(=|!=|>|<|>=|<=|LIKE)\s*\?/i);
+                // Detect if there are OR conditions
+                const hasOr = /\s+OR\s+/i.test(whereClause);
+                const hasAnd = /\s+AND\s+/i.test(whereClause);
+
+                // Parse a single condition into {field, mongoFilter}
+                const parseSingleCondition = (cond) => {
+                    // Handle IS NOT NULL
+                    const isNotNullMatch = cond.match(/([a-zA-Z0-9_.]+)\s+IS\s+NOT\s+NULL/i);
+                    if (isNotNullMatch) {
+                        const field = isNotNullMatch[1].split('.').pop();
+                        return { field, mongoFilter: { $ne: null } };
+                    }
+                    // Handle IS NULL
+                    const isNullMatch = cond.match(/([a-zA-Z0-9_.]+)\s+IS\s+NULL/i);
+                    if (isNullMatch) {
+                        const field = isNullMatch[1].split('.').pop();
+                        return { field, mongoFilter: null };
+                    }
+                    // Handle IN (?)
+                    const inMatch = cond.match(/([a-zA-Z0-9_.]+)\s+IN\s*\(\s*\?\s*\)/i);
+                    if (inMatch) {
+                        const field = inMatch[1].split('.').pop();
+                        const val = params[pIndex++];
+                        const arr = Array.isArray(val) ? val : [val];
+                        return { field, mongoFilter: { $in: arr } };
+                    }
+                    // Handle standard comparisons: =, !=, >, <, >=, <=, LIKE
+                    const eqMatch = cond.match(/([a-zA-Z0-9_.]+)\s*(=|!=|<>|>|<|>=|<=|LIKE)\s*\?/i);
                     if (eqMatch) {
-                        let field = eqMatch[1].split('.').pop();
+                        const field = eqMatch[1].split('.').pop();
                         const op = eqMatch[2];
                         const val = params[pIndex++];
 
                         if (field === 'id' && !isNaN(val)) {
-                            filter[field] = Number(val);
+                            return { field, mongoFilter: Number(val) };
                         } else if (op === '=') {
-                            filter[field] = val;
-                        } else if (op === '!=') {
-                            filter[field] = { $ne: val };
+                            return { field, mongoFilter: val };
+                        } else if (op === '!=' || op === '<>') {
+                            return { field, mongoFilter: { $ne: val } };
+                        } else if (op === '>') {
+                            return { field, mongoFilter: { $gt: val } };
+                        } else if (op === '<') {
+                            return { field, mongoFilter: { $lt: val } };
+                        } else if (op === '>=') {
+                            return { field, mongoFilter: { $gte: val } };
+                        } else if (op === '<=') {
+                            return { field, mongoFilter: { $lte: val } };
                         } else if (op.toUpperCase() === 'LIKE') {
-                            filter[field] = new RegExp(String(val).replace(/%/g, '.*'), 'i');
+                            return { field, mongoFilter: new RegExp(String(val).replace(/%/g, '.*'), 'i') };
+                        }
+                    }
+                    return null;
+                };
+
+                if (hasOr && !hasAnd) {
+                    // Pure OR query: WHERE a = ? OR b = ?
+                    const parts = whereClause.split(/\s+OR\s+/i);
+                    const orArray = [];
+                    for (const part of parts) {
+                        const parsed = parseSingleCondition(part.trim());
+                        if (parsed) {
+                            orArray.push({ [parsed.field]: parsed.mongoFilter });
+                        }
+                    }
+                    if (orArray.length > 0) {
+                        filter = { $or: orArray };
+                    }
+                } else if (hasAnd && hasOr) {
+                    // Mixed AND/OR: split by AND first, then handle OR groups
+                    // For now, handle the common pattern: a = ? AND (b = ? OR c = ?)
+                    const andParts = whereClause.split(/\s+AND\s+/i);
+                    const andConditions = [];
+                    for (const andPart of andParts) {
+                        const trimmed = andPart.trim().replace(/^\(|\)$/g, '');
+                        if (/\s+OR\s+/i.test(trimmed)) {
+                            const orParts = trimmed.split(/\s+OR\s+/i);
+                            const orArray = [];
+                            for (const orPart of orParts) {
+                                const parsed = parseSingleCondition(orPart.trim());
+                                if (parsed) {
+                                    orArray.push({ [parsed.field]: parsed.mongoFilter });
+                                }
+                            }
+                            if (orArray.length > 0) {
+                                andConditions.push({ $or: orArray });
+                            }
+                        } else {
+                            const parsed = parseSingleCondition(trimmed);
+                            if (parsed) {
+                                andConditions.push({ [parsed.field]: parsed.mongoFilter });
+                            }
+                        }
+                    }
+                    if (andConditions.length > 1) {
+                        filter = { $and: andConditions };
+                    } else if (andConditions.length === 1) {
+                        filter = andConditions[0];
+                    }
+                } else {
+                    // Pure AND or single condition
+                    const conditions = whereClause.split(/\s+AND\s+/i);
+                    for (const cond of conditions) {
+                        const parsed = parseSingleCondition(cond.trim());
+                        if (parsed) {
+                            filter[parsed.field] = parsed.mongoFilter;
                         }
                     }
                 }
